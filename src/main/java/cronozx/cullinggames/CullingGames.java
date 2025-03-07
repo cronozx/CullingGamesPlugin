@@ -1,117 +1,73 @@
 package cronozx.cullinggames;
 
-import com.velocitypowered.api.proxy.server.ServerInfo;
-import cronozx.cullinggames.commands.JoinQueueCommand;
-import cronozx.cullinggames.commands.QueueTestCommand;
-import cronozx.cullinggames.commands.ReloadCommand;
-import cronozx.cullinggames.database.CoreDatabase;
-import cronozx.cullinggames.events.PlayerDiesEvent;
-import cronozx.cullinggames.events.PlayerLeaveEvent;
-import cronozx.cullinggames.util.ConfigManager;
-import cronozx.cullinggames.util.ItemManager;
-import org.bukkit.Bukkit;
-import org.bukkit.entity.Player;
-import org.bukkit.plugin.java.JavaPlugin;
-import org.bukkit.plugin.messaging.PluginMessageListener;
-import org.jetbrains.annotations.NotNull;
+import com.google.inject.Inject;
+import com.velocitypowered.api.event.proxy.ProxyInitializeEvent;
+import com.velocitypowered.api.event.Subscribe;
+import com.velocitypowered.api.event.proxy.ProxyShutdownEvent;
+import com.velocitypowered.api.plugin.Plugin;
+import com.velocitypowered.api.proxy.Player;
+import com.velocitypowered.api.proxy.ProxyServer;
+import com.velocitypowered.api.proxy.messages.MinecraftChannelIdentifier;
+import com.velocitypowered.api.proxy.server.RegisteredServer;
+import org.slf4j.Logger;
+import redis.clients.jedis.Jedis;
+import redis.clients.jedis.JedisPool;
+import redis.clients.jedis.JedisPoolConfig;
+import redis.clients.jedis.JedisPubSub;
 
-import java.net.InetSocketAddress;
-import java.util.Random;
-import java.util.logging.Logger;
+import java.util.Optional;
 
-public final class CullingGames extends JavaPlugin implements @NotNull PluginMessageListener {
+@Plugin(id = "cullinggames", name = "cullinggames", version = BuildConstants.VERSION, authors = {"cronozx"})
+public class CullingGames {
 
-    private CoreDatabase database;
-    private ConfigManager configManager;
-    private ItemManager itemManager;
-    private ServerInfo serverInfo;
-    private final Logger logger = Logger.getLogger(CullingGames.class.getName());
-    private final Random random = new Random();
+    public static final MinecraftChannelIdentifier IDENTIFIER = MinecraftChannelIdentifier.from("cullinggames:main");
+    private final Logger logger;
+    private final ProxyServer server;
+    private JedisPool jedisPool;
 
-    @Override
-    public void onEnable() {
-        printStartupMsg();
+    @Inject
+    public CullingGames(ProxyServer server, Logger logger) {
+        this.server = server;
+        this.logger = logger;
+        this.jedisPool = new JedisPool(new JedisPoolConfig(), "", 0, 2000, "");
 
-        if (!getDataFolder().exists()) {
-            getDataFolder().mkdirs();
-        }
+        new Thread(() -> {
+            try (Jedis jedis = jedisPool.getResource()) {
+                jedis.subscribe(new JedisPubSub() {
+                    @Override
+                    public void onMessage(String channel, String message) {
+                        if (message.startsWith("teleportTo:")) {
+                            String[] parts = message.split(":");
 
-        this.getServer().getMessenger().registerOutgoingPluginChannel(this, "cullinggames:jedis");
+                            if (parts.length < 3) {
+                                logger.warn("Invalid message format. Message: {}", message);
+                                return;
+                            }
 
-        InetSocketAddress address = new InetSocketAddress("127.0.0.1", 25570);
-        serverInfo = new ServerInfo("CullingGames", address);
+                            String serverName = parts[1];
+                            String playerName = parts[2];
+                            Optional<Player> player = server.getPlayer(playerName);
+                            Optional<RegisteredServer> targetServer = server.getServer(serverName);
 
-        configManager = new ConfigManager(this);
-        configManager.loadConfig();
-
-        database = new CoreDatabase();
-
-        itemManager = new ItemManager();
-        registerCommands();
-        registerEvents();
-        Bukkit.getScheduler().runTask(this, itemManager);
-
-        //new ChatTask();
+                            if (player.isPresent() && targetServer.isPresent()) {
+                                player.get().createConnectionRequest(targetServer.get()).fireAndForget();
+                            }
+                        }
+                    }
+                }, "cullinggames:jedis");
+            } catch (Exception e) {
+                logger.error("Error subscribing to Redis channel: " + e.getMessage());
+            }
+        }).start();
     }
 
-    @Override
-    public void onDisable() {
-        configManager.saveConfig();
-        database.clearQueue();
-        database.closeConnection();
-        this.getServer().getMessenger().unregisterOutgoingPluginChannel(this, "cullinggames:jedis");
+    @Subscribe
+    public void onProxyDisable(ProxyShutdownEvent event) {
+        jedisPool.close();
     }
 
-    private void registerCommands() {
-        JoinQueueCommand queueCommand = new JoinQueueCommand(this);
-        ReloadCommand reloadCommand = new ReloadCommand(this);
-        QueueTestCommand startCommand = new QueueTestCommand(this);
-
-        getCommand("queue").setExecutor(queueCommand);
-        getCommand("reload").setExecutor(reloadCommand);
-        getCommand("starttest").setExecutor(startCommand);
-    }
-
-    private void registerEvents() {
-        PlayerLeaveEvent playerLeaveEvent = new PlayerLeaveEvent();
-        PlayerDiesEvent playerDiesEvent = new PlayerDiesEvent();
-
-        Bukkit.getPluginManager().registerEvents(playerLeaveEvent, this);
-        Bukkit.getPluginManager().registerEvents(playerDiesEvent, this);
-    }
-
-    public static CullingGames getInstance() {
-        return getPlugin(CullingGames.class);
-    }
-
-    public CoreDatabase getDatabase() {
-        return database;
-    }
-
-    public ItemManager getItemManager() {
-        return itemManager;
-    }
-
-    public ConfigManager getConfigManager() {
-        return configManager;
-    }
-
-    private void printStartupMsg() {
-        logger.info(
-                "Culling Games plugin created by cronozx"
-        );
-    }
-
-    public ServerInfo getServerInfo() {
-        return serverInfo;
-    }
-
-    public Random getRandom() {
-        return random;
-    }
-
-    @Override
-    public void onPluginMessageReceived(@NotNull String s, @NotNull Player player, @NotNull byte[] bytes) {
-
+    @Subscribe
+    public void onProxyInitialization(ProxyInitializeEvent event) {
+        server.getChannelRegistrar().register(IDENTIFIER);
     }
 }
