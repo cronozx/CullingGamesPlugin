@@ -1,5 +1,5 @@
-# Culling Games Plugin
+# Velocity Culling Games Plugin
 **UNDER DEVELOPMENT**
-Bukkit plugin that replicates the JJK CullingGames
+Velocity side of the Culling Games Plugin NEEDED for Bukkit side to work
 
 When compiling use `.gradlew /ShadowJar`
